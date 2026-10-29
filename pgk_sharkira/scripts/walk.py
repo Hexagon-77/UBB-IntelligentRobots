@@ -12,8 +12,10 @@ from puppy_control.msg import Velocity, Pose, Gait
 ROS_NODE_NAME = 'puppy_demo'
 DEFAULT_TCP_PORT = 9999
 
-PuppyMove = {'x':6, 'y':0, 'yaw_rate':0}
-PuppyReverse = {'x':-5, 'y':0, 'yaw_rate':0}
+SPEED_FORWARD = 6
+SPEED_BACK = -5
+YAW_RATE = 0.3
+
 PuppyPose = {'roll':math.radians(0), 'pitch':math.radians(0), 'yaw':0.000, 'height':-10, 'x_shift':0.5, 'stance_x':0, 'stance_y':0}
 
 gait = 'Amble'
@@ -33,6 +35,30 @@ elif gait == 'Walk':
 stdin_old_settings = None
 tcp_server = None
 tcp_client = None
+network_rx_buffer = ''
+
+class ControlState(object):
+    __slots__ = ('w', 'a', 's', 'd', 'z')
+
+    def __init__(self):
+        self.w = self.a = self.s = self.d = self.z = False
+
+    def velocity(self):
+        if self.z:
+            return 0.0, 0.0, 0.0
+        x = 0.0
+        if self.w:
+            x += SPEED_FORWARD
+        if self.s:
+            x += SPEED_BACK
+        yaw_rate = 0.0
+        if self.a:
+            yaw_rate += YAW_RATE
+        if self.d:
+            yaw_rate -= YAW_RATE
+        return x, 0.0, yaw_rate
+
+control = ControlState()
 
 def cleanup():
     PuppyVelocityPub.publish(x=0, y=0, yaw_rate=0)
@@ -40,20 +66,43 @@ def cleanup():
     close_network()
     print('is_shutdown')
 
-def walk(move):
-    PuppyVelocityPub.publish(x=move['x'], y=move['y'], yaw_rate=move['yaw_rate'])
+def apply_velocity():
+    x, y, yaw_rate = control.velocity()
+    PuppyVelocityPub.publish(x=x, y=y, yaw_rate=yaw_rate)
 
 def stop():
-    PuppyVelocityPub.publish(x=0, y=0, yaw_rate=0)
+    control.w = control.a = control.s = control.d = control.z = False
+    apply_velocity()
 
-def handle_key(key):
-    rospy.loginfo('key: %s', repr(key))
-    if key in ('w', 'W'):
-        walk(PuppyMove)
-    elif key in ('s', 'S'):
-        walk(PuppyReverse)
-    elif key in ('z', 'Z'):
-        stop()
+def set_key(key, down):
+    k = key.lower()
+    if k not in 'wasdz':
+        return
+    attr = k
+    if getattr(control, attr) == down:
+        return
+    setattr(control, attr, down)
+    rospy.loginfo('key %s %s', 'down' if down else 'up', k)
+    apply_velocity()
+
+def feed_network_text(text):
+    global network_rx_buffer
+    network_rx_buffer += text
+    while network_rx_buffer:
+        ch = network_rx_buffer[0]
+        if ch in '+-':
+            if len(network_rx_buffer) < 2:
+                break
+            down = ch == '+'
+            key = network_rx_buffer[1]
+            network_rx_buffer = network_rx_buffer[2:]
+            set_key(key, down)
+            continue
+        if ch in '\r\n':
+            network_rx_buffer = network_rx_buffer[1:]
+            continue
+        network_rx_buffer = network_rx_buffer[1:]
+        rospy.logwarn('ignored network byte: %s', repr(ch))
 
 def setup_keyboard():
     global stdin_old_settings
@@ -77,9 +126,35 @@ def read_key():
         if msvcrt.kbhit():
             return msvcrt.getch().decode('utf-8', errors='ignore')
         return None
-    if select.select([sys.stdin], [], [], 0.05)[0]:
+    if select.select([sys.stdin], [], [], 0)[0]:
         return sys.stdin.read(1)
     return None
+
+def poll_stdin_keys():
+    key = read_key()
+    if key is None:
+        return
+    if key in '+-':
+        nxt = read_key()
+        if nxt is None:
+            return
+        feed_network_text(key + nxt)
+
+def start_pynput_listener():
+    from pynput import keyboard
+
+    def on_press(key):
+        if getattr(key, 'char', None):
+            set_key(key.char, True)
+
+    def on_release(key):
+        if getattr(key, 'char', None):
+            set_key(key.char, False)
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.daemon = True
+    listener.start()
+    return listener
 
 def close_network():
     global tcp_server, tcp_client
@@ -97,16 +172,25 @@ def setup_network(host, port):
     tcp_server.bind((host, port))
     tcp_server.listen(1)
     tcp_server.setblocking(False)
-    rospy.loginfo('TCP listening on %s:%s', host, port)
+    rospy.loginfo('TCP listening on %s:%s (+w/-w key up/down protocol)', host, port)
 
 def run_keyboard_loop():
-    setup_keyboard()
+    use_pynput = False
+    if sys.platform == 'win32':
+        rospy.loginfo('keyboard: WASD+Z polled')
+    else:
+        try:
+            start_pynput_listener()
+            use_pynput = True
+            rospy.loginfo('keyboard: WASD+Z via pynput')
+        except ImportError:
+            setup_keyboard()
+            rospy.loginfo('keyboard: type +w/-w for key up/down (+a/+d/+s/+z)')
+
     while not rospy.is_shutdown():
         try:
-            key = read_key()
-            if key is None:
-                continue
-            handle_key(key)
+            poll_stdin_keys()
+            rospy.sleep(0.05)
         except KeyboardInterrupt:
             restore_keyboard()
             sys.exit(0)
@@ -131,8 +215,7 @@ def run_network_loop():
                         sock.close()
                         tcp_client = None
                         continue
-                    for key in data.decode('utf-8', errors='ignore'):
-                        handle_key(key)
+                    feed_network_text(data.decode('utf-8', errors='ignore'))
         except KeyboardInterrupt:
             sys.exit(0)
 

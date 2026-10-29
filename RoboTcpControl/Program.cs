@@ -1,69 +1,79 @@
 ﻿using System;
 using System.Net.Sockets;
-using System.Net;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 
 class Program
 {
-    private static string ReadString(BinaryReader reader, Action<string> callback = null)
+    const int DefaultPort = 9999;
+    const int PollMs = 50;
+
+    static readonly int[] VkKeys = { 0x57, 0x41, 0x53, 0x44, 0x5A };
+    static readonly char[] KeyChars = { 'w', 'a', 's', 'd', 'z' };
+    static readonly bool[] Held = new bool[KeyChars.Length];
+
+    [DllImport("user32.dll")]
+    static extern short GetAsyncKeyState(int vKey);
+
+    static bool IsDown(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
+
+    static void SendKey(NetworkStream stream, char key, bool down)
     {
-        char term = (char)10;
-        char res = '_';
-        string str = "";
-
-        while (res != term)
-        {
-            res = reader.ReadChar();
-
-            if (res != term)
-                str += res;
-
-            if (callback != null)
-                callback($"{str}: '{(int)res}/{res}'");
-        }
-
-        return str;
+        var msg = Encoding.ASCII.GetBytes($"{(down ? '+' : '-')}{key}");
+        stream.Write(msg, 0, msg.Length);
+        stream.Flush();
     }
 
-    private static void WriteString(BinaryWriter writer, string str)
+    static void ReleaseAll(NetworkStream stream)
     {
-        str = str.Trim();
-
-        foreach (char c in str)
+        for (int i = 0; i < KeyChars.Length; i++)
         {
-            writer.Write(c);
+            if (!Held[i])
+                continue;
+            Held[i] = false;
+            SendKey(stream, KeyChars[i], down: false);
         }
     }
 
-    private static void ClientReadChars(BinaryWriter writer, BinaryReader reader)
+    static void PollAndSend(NetworkStream stream)
     {
-        while (true)
+        for (int i = 0; i < VkKeys.Length; i++)
         {
-            string str = ReadString(reader);
-            Console.WriteLine($"Response: {str}");
-
-            string resp = Console.ReadLine();
-            WriteString(writer, resp);
+            bool down = IsDown(VkKeys[i]);
+            if (down == Held[i])
+                continue;
+            Held[i] = down;
+            SendKey(stream, KeyChars[i], down);
         }
     }
 
     static void Main(string[] args)
     {
-        string ip = "192.168.149.1";
+        string ip = args.Length > 0 ? args[0] : "192.168.149.1";
+        int port = args.Length > 1 && int.TryParse(args[1], out int p) ? p : DefaultPort;
+
+        Console.WriteLine("+w/-w, +a/-a, +s/-s, +d/-d, +z/-z");
+        Console.WriteLine($"Connecting to {ip}:{port}...");
 
         try
         {
-            using (TcpClient client = new TcpClient(ip, 9999))
-            using (NetworkStream stream = client.GetStream())
-            {
-                var writer = new BinaryWriter(stream);
-                var reader = new BinaryReader(stream);
+            using TcpClient client = new TcpClient(ip, port);
+            using NetworkStream stream = client.GetStream();
 
-                while (true)
-                {
-                    var input = Console.ReadKey().KeyChar;
-                    WriteString(writer, input.ToString());
-                }
+            Console.WriteLine("Connected.");
+
+            while (true)
+            {
+                if (IsDown(0x1B))
+                    break;
+
+                PollAndSend(stream);
+                Thread.Sleep(PollMs);
             }
+
+            ReleaseAll(stream);
+            Console.WriteLine("Disconnected.");
         }
         catch (Exception ex)
         {
