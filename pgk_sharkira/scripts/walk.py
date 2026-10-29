@@ -18,11 +18,11 @@ YAW_RATE = 0.3
 
 PuppyPose = {'roll':math.radians(0), 'pitch':math.radians(0), 'yaw':0.000, 'height':-10, 'x_shift':0.5, 'stance_x':0, 'stance_y':0}
 
-gait = 'Amble'
+gait = 'Trot'
 
 if gait == 'Trot':
     GaitConfig = {'overlap_time':0.2, 'swing_time':0.3, 'clearance_time':0.0, 'z_clearance':5}
-    PuppyPose['x_shift'] = -0.6
+    PuppyPose['x_shift'] = 0.6
 
 elif gait == 'Amble':
     GaitConfig = {'overlap_time':0.1, 'swing_time':0.2, 'clearance_time':0.1, 'z_clearance':5}
@@ -31,6 +31,21 @@ elif gait == 'Amble':
 elif gait == 'Walk':
     GaitConfig = {'overlap_time':0.1, 'swing_time':0.2, 'clearance_time':0.3, 'z_clearance':5}
     PuppyPose['x_shift'] = -0.65
+
+def build_pose(height, pitch, x_shift=None):
+    pose = dict(PuppyPose)
+    pose['height'] = height
+    pose['pitch'] = pitch
+    if x_shift is not None:
+        pose['x_shift'] = x_shift
+    return pose
+
+POSE_WALK = build_pose(PuppyPose['height'], PuppyPose['pitch'])
+POSE_SIT_FLAT = build_pose(-20, math.radians(0), x_shift=0)
+POSE_SIT_ANGLE = build_pose(-6, math.radians(28), x_shift=-1.1)
+
+MOTION_KEYS = frozenset('wasdz')
+POSE_KEYS = frozenset('kl')
 
 stdin_old_settings = None
 tcp_server = None
@@ -74,15 +89,37 @@ def stop():
     control.w = control.a = control.s = control.d = control.z = False
     apply_velocity()
 
+def publish_pose(pose):
+    PuppyPosePub.publish(
+        stance_x=pose['stance_x'], stance_y=pose['stance_y'], x_shift=pose['x_shift'],
+        height=pose['height'], roll=pose['roll'], pitch=pose['pitch'], yaw=pose['yaw'],
+        run_time=800,
+    )
+
+def apply_pose(pose, label):
+    stop()
+    publish_pose(pose)
+    rospy.loginfo('pose: %s', label)
+
 def set_key(key, down):
     k = key.lower()
-    if k not in 'wasdz':
+    if k in POSE_KEYS:
+        if not down:
+            return
+        if k == 'k':
+            apply_pose(POSE_SIT_FLAT, 'sit_flat')
+        elif k == 'l':
+            apply_pose(POSE_SIT_ANGLE, 'sit_angle')
+        return
+    if k not in MOTION_KEYS:
         return
     attr = k
     if getattr(control, attr) == down:
         return
     setattr(control, attr, down)
     rospy.loginfo('key %s %s', 'down' if down else 'up', k)
+    if down and k in 'wasd':
+        publish_pose(POSE_WALK)
     apply_velocity()
 
 def feed_network_text(text):
@@ -106,8 +143,6 @@ def feed_network_text(text):
 
 def setup_keyboard():
     global stdin_old_settings
-    if sys.platform == 'win32':
-        return
     import tty
     import termios
     fd = sys.stdin.fileno()
@@ -121,11 +156,6 @@ def restore_keyboard():
     termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, stdin_old_settings)
 
 def read_key():
-    if sys.platform == 'win32':
-        import msvcrt
-        if msvcrt.kbhit():
-            return msvcrt.getch().decode('utf-8', errors='ignore')
-        return None
     if select.select([sys.stdin], [], [], 0)[0]:
         return sys.stdin.read(1)
     return None
@@ -139,6 +169,8 @@ def poll_stdin_keys():
         if nxt is None:
             return
         feed_network_text(key + nxt)
+
+pose_key_held = {'k': False, 'l': False}
 
 def start_pynput_listener():
     from pynput import keyboard
@@ -172,20 +204,16 @@ def setup_network(host, port):
     tcp_server.bind((host, port))
     tcp_server.listen(1)
     tcp_server.setblocking(False)
-    rospy.loginfo('TCP listening on %s:%s (+w/-w key up/down protocol)', host, port)
+    rospy.loginfo('TCP listening on %s:%s (+w/-w motion, +k/+l pose)', host, port)
 
 def run_keyboard_loop():
-    use_pynput = False
-    if sys.platform == 'win32':
-        rospy.loginfo('keyboard: WASD+Z polled')
-    else:
-        try:
-            start_pynput_listener()
-            use_pynput = True
-            rospy.loginfo('keyboard: WASD+Z via pynput')
-        except ImportError:
-            setup_keyboard()
-            rospy.loginfo('keyboard: type +w/-w for key up/down (+a/+d/+s/+z)')
+    try:
+        start_pynput_listener()
+        use_pynput = True
+        rospy.loginfo('keyboard: WASD+Z via pynput')
+    except ImportError:
+        setup_keyboard()
+        rospy.loginfo('keyboard: type +w/-w (+k/+l pose)')
 
     while not rospy.is_shutdown():
         try:
@@ -244,8 +272,7 @@ if __name__ == '__main__':
     set_mark_time_srv = rospy.ServiceProxy('/puppy_control/set_mark_time', SetBool)
 
     rospy.sleep(0.2)
-    PuppyPosePub.publish(stance_x=PuppyPose['stance_x'], stance_y=PuppyPose['stance_y'], x_shift=PuppyPose['x_shift']
-            ,height=PuppyPose['height'], roll=PuppyPose['roll'], pitch=PuppyPose['pitch'], yaw=PuppyPose['yaw'], run_time = 500)
+    publish_pose(POSE_WALK)
     
     rospy.sleep(0.2)
     PuppyGaitConfigPub.publish(overlap_time = GaitConfig['overlap_time'], swing_time = GaitConfig['swing_time']

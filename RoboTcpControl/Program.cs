@@ -13,6 +13,10 @@ class Program
     static readonly char[] KeyChars = { 'w', 'a', 's', 'd', 'z' };
     static readonly bool[] Held = new bool[KeyChars.Length];
 
+    static readonly int[] VkPoseKeys = { 0x4B, 0x4C };
+    static readonly char[] PoseKeyChars = { 'k', 'l' };
+    static readonly bool[] PoseHeld = new bool[PoseKeyChars.Length];
+
     [DllImport("user32.dll")]
     static extern short GetAsyncKeyState(int vKey);
 
@@ -21,6 +25,13 @@ class Program
     static void SendKey(NetworkStream stream, char key, bool down)
     {
         var msg = Encoding.ASCII.GetBytes($"{(down ? '+' : '-')}{key}");
+        stream.Write(msg, 0, msg.Length);
+        stream.Flush();
+    }
+
+    static void SendPoseKey(NetworkStream stream, char key)
+    {
+        var msg = Encoding.ASCII.GetBytes($"+{key}");
         stream.Write(msg, 0, msg.Length);
         stream.Flush();
     }
@@ -46,6 +57,14 @@ class Program
             Held[i] = down;
             SendKey(stream, KeyChars[i], down);
         }
+
+        for (int i = 0; i < VkPoseKeys.Length; i++)
+        {
+            bool down = IsDown(VkPoseKeys[i]);
+            if (down && !PoseHeld[i])
+                SendPoseKey(stream, PoseKeyChars[i]);
+            PoseHeld[i] = down;
+        }
     }
 
     static void Main(string[] args)
@@ -53,7 +72,7 @@ class Program
         string ip = args.Length > 0 ? args[0] : "192.168.149.1";
         int port = args.Length > 1 && int.TryParse(args[1], out int p) ? p : DefaultPort;
 
-        Console.WriteLine("+w/-w, +a/-a, +s/-s, +d/-d, +z/-z");
+        Console.WriteLine("WASD+Z+KL motion");
         Console.WriteLine($"Connecting to {ip}:{port}...");
 
         try
