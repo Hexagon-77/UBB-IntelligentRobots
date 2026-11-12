@@ -22,7 +22,7 @@ DEFAULT_CAMERA_TOPIC = '/usb_cam/image_raw'
 DEFAULT_PHOTO_DIR = os.path.expanduser('~/puppy_photos')
 WINDOW_NAME = 'PuppyPi Camera'
 
-SPEED_FORWARD = 6
+SPEED_FORWARD = 12
 SPEED_BACK = -5
 YAW_RATE = 0.3
 
@@ -51,7 +51,8 @@ def build_pose(height, pitch, x_shift=None):
     return pose
 
 POSE_WALK = build_pose(PuppyPose['height'], PuppyPose['pitch'])
-POSE_SIT_FLAT = build_pose(-20, math.radians(0), x_shift=0)
+POSE_FORWARD = build_pose(PuppyPose['height'], PuppyPose['pitch'], x_shift=-0.6)
+POSE_SIT_FLAT = build_pose(-6, math.radians(-28), x_shift=-1.1)
 POSE_SIT_ANGLE = build_pose(-6, math.radians(28), x_shift=-1.1)
 
 MOTION_KEYS = frozenset('wasdz')
@@ -183,6 +184,11 @@ def publish_pose(pose):
         run_time=800,
     )
 
+def motion_pose():
+    if control.w and not control.s:
+        return POSE_FORWARD
+    return POSE_WALK
+
 def apply_pose(pose, label):
     stop()
     publish_pose(pose)
@@ -209,8 +215,8 @@ def set_key(key, down):
         return
     setattr(control, attr, down)
     rospy.loginfo('key %s %s', 'down' if down else 'up', k)
-    if down and k in 'wasd':
-        publish_pose(POSE_WALK)
+    if k in 'wasd':
+        publish_pose(motion_pose())
     apply_velocity()
 
 def feed_network_text(text):
