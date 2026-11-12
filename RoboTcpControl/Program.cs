@@ -17,6 +17,9 @@ class Program
     static readonly char[] PoseKeyChars = { 'k', 'l' };
     static readonly bool[] PoseHeld = new bool[PoseKeyChars.Length];
 
+    const int VkPhoto = 0x50;
+    static bool photoHeld;
+
     [DllImport("user32.dll")]
     static extern short GetAsyncKeyState(int vKey);
 
@@ -65,6 +68,11 @@ class Program
                 SendPoseKey(stream, PoseKeyChars[i]);
             PoseHeld[i] = down;
         }
+
+        bool photoDown = IsDown(VkPhoto);
+        if (photoDown && !photoHeld)
+            SendPoseKey(stream, 'p');
+        photoHeld = photoDown;
     }
 
     static void Main(string[] args)
@@ -72,7 +80,7 @@ class Program
         string ip = args.Length > 0 ? args[0] : "192.168.149.1";
         int port = args.Length > 1 && int.TryParse(args[1], out int p) ? p : DefaultPort;
 
-        Console.WriteLine("WASD+Z+KL motion");
+        Console.WriteLine("WASD+Z motion, K/L pose, P save photo");
         Console.WriteLine($"Connecting to {ip}:{port}...");
 
         try

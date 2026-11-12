@@ -1,0 +1,21 @@
+# JetBrains / Rider
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# .NET build output
+[Bb]in/
+[Oo]bj/
+.vs/
+
+# ROS / catkin
+build/
+devel/
+install/
+logs/
+.catkin_workspace
+
+# OS
+.DS_Store

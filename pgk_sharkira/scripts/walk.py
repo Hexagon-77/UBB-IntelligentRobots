@@ -2,15 +2,25 @@
 
 import argparse
 import math
+import os
 import select
 import socket
 import sys
+import threading
+from datetime import datetime
+
+import cv2
 import rospy
+from cv_bridge import CvBridge
+from sensor_msgs.msg import Image
 from std_srvs.srv import SetBool
 from puppy_control.msg import Velocity, Pose, Gait
 
 ROS_NODE_NAME = 'puppy_demo'
 DEFAULT_TCP_PORT = 9999
+DEFAULT_CAMERA_TOPIC = '/usb_cam/image_raw'
+DEFAULT_PHOTO_DIR = os.path.expanduser('~/puppy_photos')
+WINDOW_NAME = 'PuppyPi Camera'
 
 SPEED_FORWARD = 6
 SPEED_BACK = -5
@@ -46,11 +56,17 @@ POSE_SIT_ANGLE = build_pose(-6, math.radians(28), x_shift=-1.1)
 
 MOTION_KEYS = frozenset('wasdz')
 POSE_KEYS = frozenset('kl')
+PHOTO_KEY = 'p'
 
 stdin_old_settings = None
 tcp_server = None
 tcp_client = None
 network_rx_buffer = ''
+frame_lock = threading.Lock()
+latest_frame = None
+cv_bridge = CvBridge()
+display_ok = True
+photo_dir = DEFAULT_PHOTO_DIR
 
 class ControlState(object):
     __slots__ = ('w', 'a', 's', 'd', 'z')
@@ -79,7 +95,78 @@ def cleanup():
     PuppyVelocityPub.publish(x=0, y=0, yaw_rate=0)
     restore_keyboard()
     close_network()
+    close_camera_window()
     print('is_shutdown')
+
+def copy_frame():
+    with frame_lock:
+        if latest_frame is None:
+            return None
+        return latest_frame.copy()
+
+def image_callback(msg):
+    global latest_frame
+    try:
+        frame = cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+    except Exception as exc:
+        rospy.logwarn_throttle(5.0, 'camera decode failed: %s', exc)
+        return
+    with frame_lock:
+        latest_frame = frame
+
+def open_camera_window():
+    global display_ok
+    if not os.environ.get('DISPLAY'):
+        rospy.logwarn('DISPLAY is unset; the camera window needs the Pi desktop')
+    try:
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW_NAME, 640, 480)
+    except cv2.error as exc:
+        display_ok = False
+        rospy.logwarn('camera window disabled: %s', exc)
+
+def close_camera_window():
+    if not display_ok:
+        return
+    try:
+        cv2.destroyAllWindows()
+    except cv2.error:
+        pass
+
+def show_frame():
+    global display_ok
+    if not display_ok:
+        return
+    frame = copy_frame()
+    try:
+        if frame is not None:
+            cv2.imshow(WINDOW_NAME, frame)
+        cv2.waitKey(1)
+    except cv2.error as exc:
+        display_ok = False
+        rospy.logwarn('camera window disabled: %s', exc)
+
+def save_photo():
+    frame = copy_frame()
+    if frame is None:
+        rospy.logwarn('photo: no camera frame yet')
+        return
+    os.makedirs(photo_dir, exist_ok=True)
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    path = os.path.join(photo_dir, 'frame_%s.jpg' % stamp)
+    n = 1
+    while os.path.exists(path):
+        n += 1
+        path = os.path.join(photo_dir, 'frame_%s_%d.jpg' % (stamp, n))
+    if cv2.imwrite(path, frame):
+        rospy.loginfo('photo saved: %s', path)
+    else:
+        rospy.logwarn('photo: failed to write %s', path)
+
+def setup_camera(topic):
+    rospy.Subscriber(topic, Image, image_callback, queue_size=1, buff_size=2 ** 24)
+    open_camera_window()
+    rospy.loginfo('camera: %s (window on this Pi, photos in %s)', topic, photo_dir)
 
 def apply_velocity():
     x, y, yaw_rate = control.velocity()
@@ -103,6 +190,10 @@ def apply_pose(pose, label):
 
 def set_key(key, down):
     k = key.lower()
+    if k == PHOTO_KEY:
+        if down:
+            save_photo()
+        return
     if k in POSE_KEYS:
         if not down:
             return
@@ -204,7 +295,7 @@ def setup_network(host, port):
     tcp_server.bind((host, port))
     tcp_server.listen(1)
     tcp_server.setblocking(False)
-    rospy.loginfo('TCP listening on %s:%s (+w/-w motion, +k/+l pose)', host, port)
+    rospy.loginfo('TCP listening on %s:%s (+w/-w motion, +k/+l pose, +p photo)', host, port)
 
 def run_keyboard_loop():
     try:
@@ -218,6 +309,7 @@ def run_keyboard_loop():
     while not rospy.is_shutdown():
         try:
             poll_stdin_keys()
+            show_frame()
             rospy.sleep(0.05)
         except KeyboardInterrupt:
             restore_keyboard()
@@ -231,6 +323,7 @@ def run_network_loop():
             if tcp_client is not None:
                 readers.append(tcp_client)
             ready, _, _ = select.select(readers, [], [], 0.05)
+            show_frame()
             for sock in ready:
                 if sock is tcp_server:
                     tcp_client, addr = tcp_server.accept()
@@ -257,10 +350,13 @@ def parse_args():
     parser.set_defaults(input_mode='keyboard')
     parser.add_argument('--host', default='0.0.0.0', help='TCP bind address (network mode)')
     parser.add_argument('--port', type=int, default=DEFAULT_TCP_PORT, help='TCP port (network mode)')
+    parser.add_argument('--camera-topic', default=DEFAULT_CAMERA_TOPIC, help='camera Image topic')
+    parser.add_argument('--photo-dir', default=DEFAULT_PHOTO_DIR, help='directory for saved frames')
     return parser.parse_args(rospy.myargv(argv=sys.argv)[1:])
 
 if __name__ == '__main__':
     args = parse_args()
+    photo_dir = args.photo_dir
 
     rospy.init_node(ROS_NODE_NAME, log_level=rospy.INFO)
     rospy.on_shutdown(cleanup)
@@ -281,6 +377,7 @@ if __name__ == '__main__':
 
     set_mark_time_srv(False)
     stop()
+    setup_camera(args.camera_topic)
 
     if args.input_mode == 'network':
         setup_network(args.host, args.port)
